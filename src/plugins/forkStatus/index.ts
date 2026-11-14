@@ -13,8 +13,14 @@ import gitRemote from "~git-remote";
 
 const logger = new Logger("ForkStatus");
 
+const UPSTREAM = "Vendicated/Vencord";
 const INITIAL_DELAY = 15_000;
 const CHECK_INTERVAL = 6 * 60 * 60_000;
+// The workflow publishes within a day of an upstream release, so a newer release that is still
+// not built means the sync is stuck rather than merely late
+const BEHIND_GRACE = 36 * 60 * 60_000;
+// Flag forks that publish nothing at all for a long time, which also covers the schedule dying
+const STALE_AFTER = 30 * 24 * 60 * 60_000;
 
 interface WorkflowRun {
     id: number;
@@ -24,6 +30,11 @@ interface WorkflowRun {
 
 interface RanJob {
     steps?: { name: string; conclusion: string | null; }[];
+}
+
+interface Release {
+    body?: string | null;
+    updated_at?: string;
 }
 
 const api = (path: string) => fetch(`https://api.github.com/repos/${gitRemote}${path}`, {
@@ -36,9 +47,36 @@ let notifiedRunId: number | null = null;
 let initialTimeout: ReturnType<typeof setTimeout>;
 let interval: ReturnType<typeof setInterval>;
 
-const openRun = (url: string) => IS_WEB
+const openUrl = (url: string) => IS_WEB
     ? void window.open(url, "_blank")
     : void VencordNative.native.openExternal(url);
+
+const notify = (title: string, body: string, url: string) => {
+    showNotification({
+        title,
+        body,
+        // A timed toast can be missed, and this is the one telling you why updates stopped
+        permanent: true,
+        noPersist: true,
+        onClick: () => openUrl(url)
+    }).catch(err => logger.error("Failed to show a notification", err));
+};
+
+const parseVersion = (tag: string) => {
+    const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(tag);
+    return match ? match.slice(1).map(Number) : null;
+};
+
+const compareVersions = (a: string, b: string) => {
+    const va = parseVersion(a);
+    const vb = parseVersion(b);
+    if (!va || !vb) return 0;
+
+    for (let i = 0; i < va.length; i++) {
+        if (va[i] !== vb[i]) return va[i] - vb[i];
+    }
+    return 0;
+};
 
 async function describeFailure(runId: number) {
     const res = await api(`/actions/runs/${runId}/jobs`);
@@ -49,8 +87,8 @@ async function describeFailure(runId: number) {
         const step = job.steps?.find(s => s.conclusion === "failure");
         if (!step) continue;
 
-        if (step.name === "Sync with upstream")
-            return "The upstream sync failed, so Discord's latest changes were not merged. This is almost always a rebase conflict that has to be resolved by hand.";
+        if (step.name === "Sync with upstream release")
+            return "The upstream sync failed, so the new release was not merged. This is almost always a rebase conflict that has to be resolved by hand.";
         return `The build failed at "${step.name}".`;
     }
 
@@ -62,37 +100,84 @@ async function checkLatestRun() {
 
     if (res.status === 403) {
         logger.warn("GitHub API rate limit reached, skipping this check");
-        return;
+        return false;
     }
     if (!res.ok) throw new Error(`GitHub API responded with ${res.status}`);
 
     const { workflow_runs: [run] } = await res.json() as { workflow_runs: WorkflowRun[]; };
-    if (!run) return;
+    if (!run) return false;
 
     if (run.conclusion !== "failure" && run.conclusion !== "timed_out") {
         notifiedRunId = null;
+        return false;
+    }
+
+    if (notifiedRunId === run.id) return true;
+    notifiedRunId = run.id;
+
+    notify(
+        "Vencord build failed",
+        `${await describeFailure(run.id)} Until it is fixed you stay on the last build that worked. Click to open the failed run.`,
+        run.html_url
+    );
+    return true;
+}
+
+async function newestUpstreamTag() {
+    const res = await fetch(`https://api.github.com/repos/${UPSTREAM}/tags?per_page=30`, {
+        headers: { Accept: "application/vnd.github+json" }
+    });
+    if (!res.ok) return null;
+
+    const tags = await res.json() as { name: string; }[];
+    const versions = tags.map(t => t.name).filter(t => parseVersion(t) !== null);
+
+    return versions.sort(compareVersions).at(-1) ?? null;
+}
+
+async function checkReleaseFreshness() {
+    const res = await api("/releases/latest");
+    if (!res.ok) return;
+
+    const release = await res.json() as Release;
+    const updated = Date.parse(release.updated_at ?? "");
+    if (Number.isNaN(updated)) return;
+
+    const newest = await newestUpstreamTag();
+    if (!newest) return;
+
+    // The workflow records the upstream ref it built from in the release body
+    const built = /Upstream: (\S+)/.exec(release.body ?? "")?.[1];
+    const age = Date.now() - updated;
+    const actionsUrl = `https://github.com/${gitRemote}/actions/workflows/build.yml`;
+
+    if (built && compareVersions(newest, built) > 0 && age > BEHIND_GRACE) {
+        notify(
+            "Vencord build is behind",
+            `Upstream is on ${newest}, but this fork is still built from ${built} and has not published since ${new Date(updated).toLocaleString()}. The sync is stuck.`,
+            actionsUrl
+        );
         return;
     }
 
-    if (notifiedRunId === run.id) return;
-    notifiedRunId = run.id;
+    if (age > STALE_AFTER) {
+        notify(
+            "No new Vencord build",
+            `Nothing has been published for ${Math.round(age / 86_400_000)} days${built ? `, last from ${built}` : ""}. Either upstream has not released, or the workflow stopped running.`,
+            actionsUrl
+        );
+    }
+}
 
-    const reason = await describeFailure(run.id);
-
-    showNotification({
-        title: "Vencord build failed",
-        body: `${reason} Until it is fixed you stay on the last build that worked. Click to open the failed run.`,
-        // This is the notification that explains why updates stopped arriving, so do not let
-        // it time out before it is read
-        permanent: true,
-        noPersist: true,
-        onClick: () => openRun(run.html_url)
-    }).catch(err => logger.error("Failed to show the build failure notification", err));
+async function check() {
+    // One toast at a time: a permanent notification holds up the queue until it is dismissed
+    const failed = await checkLatestRun();
+    if (!failed) await checkReleaseFreshness();
 }
 
 export default definePlugin({
     name: "ForkStatus",
-    description: "Tells you when this build's GitHub build or upstream sync fails, so you notice when updates stop arriving",
+    description: "Tells you when this build's GitHub build or upstream sync fails, or when it stops receiving upstream releases",
     tags: ["Notifications", "Utility"],
     authors: [Devs.Murpgy],
 
@@ -100,11 +185,11 @@ export default definePlugin({
         // Watching upstream's own CI is not actionable here
         if (gitRemote === "Vendicated/Vencord") return;
 
-        const check = () => void checkLatestRun().catch(err => logger.error("Failed to check the latest build", err));
+        const run = () => void check().catch(err => logger.error("Failed to check the build status", err));
 
         // Let Discord finish loading before hitting the network
-        initialTimeout = setTimeout(check, INITIAL_DELAY);
-        interval = setInterval(check, CHECK_INTERVAL);
+        initialTimeout = setTimeout(run, INITIAL_DELAY);
+        interval = setInterval(run, CHECK_INTERVAL);
     },
 
     stop() {
