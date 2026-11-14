@@ -129,10 +129,24 @@ async function newestUpstreamTag() {
     });
     if (!res.ok) return null;
 
-    const tags = await res.json() as { name: string; }[];
-    const versions = tags.map(t => t.name).filter(t => parseVersion(t) !== null);
+    const tags = await res.json() as { name: string; commit: { sha: string; }; }[];
 
-    return versions.sort(compareVersions).at(-1) ?? null;
+    return tags
+        .filter(t => parseVersion(t.name) !== null)
+        .sort((a, b) => compareVersions(a.name, b.name))
+        .at(-1) ?? null;
+}
+
+async function tagDate(sha: string) {
+    const res = await fetch(`https://api.github.com/repos/${UPSTREAM}/commits/${sha}`, {
+        headers: { Accept: "application/vnd.github+json" }
+    });
+    if (!res.ok) return null;
+
+    const { commit } = await res.json() as { commit: { committer: { date: string; }; }; };
+    const date = Date.parse(commit.committer.date);
+
+    return Number.isNaN(date) ? null : date;
 }
 
 async function checkReleaseFreshness() {
@@ -148,18 +162,23 @@ async function checkReleaseFreshness() {
 
     // The workflow records the upstream ref it built from in the release body
     const built = /Upstream: (\S+)/.exec(release.body ?? "")?.[1];
-    const age = Date.now() - updated;
     const actionsUrl = `https://github.com/${gitRemote}/actions/workflows/build.yml`;
 
-    if (built && compareVersions(newest, built) > 0 && age > BEHIND_GRACE) {
+    if (built && compareVersions(newest.name, built) > 0) {
+        // Judge by how old the release is, not by when this fork last published: a tag that
+        // appeared an hour ago is simply not built yet, since the workflow runs once a day
+        const released = await tagDate(newest.commit.sha);
+        if (released === null || Date.now() - released < BEHIND_GRACE) return;
+
         notify(
             "Vencord build is behind",
-            `Upstream is on ${newest}, but this fork is still built from ${built} and has not published since ${new Date(updated).toLocaleString()}. The sync is stuck.`,
+            `Upstream released ${newest.name} on ${new Date(released).toLocaleDateString()}, but this fork is still built from ${built}. The sync is stuck.`,
             actionsUrl
         );
         return;
     }
 
+    const age = Date.now() - updated;
     if (age > STALE_AFTER) {
         notify(
             "No new Vencord build",
