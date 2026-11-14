@@ -15,13 +15,16 @@ const logger = new Logger("StreamFit");
 
 const STYLE_ID = "vc-streamfit-styles";
 
-// The player is pinned to the stream's shape by an inline aspect-ratio on an ancestor. Rewriting
-// that ratio to the target's own is enough to make the player fill it: the width already comes
-// from the layout, so the height follows. The video keeps its own fit inside that box, so 100%
-// still shows the whole picture and zooming is what crops it.
+// The player box is sized to the stream and sits inside a larger stage area. Leaving the box alone
+// and clearing the clipping on the way up to the stage means 100% looks exactly like before, while
+// a zoomed picture is allowed to spill into the empty space around it and is only clipped by the
+// stage itself.
 const CSS = `
-[data-vc-streamfit-sizer] {
-    aspect-ratio: var(--vc-streamfit-ar) !important;
+[data-vc-streamfit-open] {
+    overflow: visible !important;
+}
+[data-vc-streamfit-stage] {
+    overflow: hidden !important;
 }
 `;
 
@@ -35,12 +38,12 @@ interface CropState {
 
 const crops = new Map<HTMLVideoElement, CropState>();
 
-// Last ratio applied to a video, so repeated events do not redo the same work
-const appliedRatios = new WeakMap<HTMLVideoElement, string>();
+// Stage last applied to a video, so repeated events do not redo the same work
+const appliedStages = new WeakMap<HTMLVideoElement, HTMLElement | null>();
 
 const settings = definePluginSettings({
     unlockAspect: {
-        description: "Let the stream fill the player instead of keeping the stream's aspect ratio",
+        description: "Let a zoomed stream fill the space around the player instead of being clipped to the stream's own box",
         type: OptionType.BOOLEAN,
         default: false,
         onChange: () => forEachStream(applyFill)
@@ -95,11 +98,12 @@ function describe(el: Element | null) {
 }
 
 function clearFill(video: HTMLVideoElement) {
-    const sizer = findSizer(video);
+    for (let el = video.parentElement, depth = 0; el && depth < 12; el = el.parentElement, depth++) {
+        el.removeAttribute("data-vc-streamfit-open");
+        el.removeAttribute("data-vc-streamfit-stage");
+    }
 
-    sizer?.removeAttribute("data-vc-streamfit-sizer");
-    sizer?.style.removeProperty("--vc-streamfit-ar");
-    appliedRatios.delete(video);
+    appliedStages.delete(video);
 }
 
 function applyFill(video: HTMLVideoElement) {
@@ -114,45 +118,49 @@ function applyFill(video: HTMLVideoElement) {
         return;
     }
 
-    const sizerRect = sizer.getBoundingClientRect();
-    if (sizerRect.width < 160) {
-        if (appliedRatios.get(video) !== "skip") {
-            appliedRatios.set(video, "skip");
-            logger.warn("Sizer has no usable width, leaving the player alone", describe(sizer));
-        }
+    const box = sizer.getBoundingClientRect();
+    if (box.width < 160 || box.height < 100) {
+        logger.warn("Player box has no usable size", describe(sizer));
         return;
     }
 
-    // The parent is often sized by this very element, so walking up to the first ancestor that is
-    // already taller than the player is what actually finds the area the player should fill
-    let target: HTMLElement | null = null;
-    const ancestors: string[] = [];
+    // Everything between the video and the first ancestor that is already larger than the player
+    // can be allowed to show overflow; the player box itself stays exactly as it is, so 100%
+    // still looks like it used to
+    const chain: HTMLElement[] = [];
+    let stage: HTMLElement | null = null;
 
-    for (let el = sizer.parentElement, depth = 0; el && depth < 8; el = el.parentElement, depth++) {
-        const rect = el.getBoundingClientRect();
-        ancestors.push(describe(el));
+    for (let el = video.parentElement, depth = 0; el && depth < 10; el = el.parentElement, depth++) {
+        if (el !== sizer) {
+            const rect = el.getBoundingClientRect();
+            if (rect.height > box.height + 16 && rect.width >= box.width - 8 && rect.width <= window.innerWidth + 1) {
+                stage = el;
+                break;
+            }
+        }
 
-        if (!target && rect.height > sizerRect.height + 16 && rect.width >= sizerRect.width - 8 && rect.width <= window.innerWidth + 1)
-            target = el;
+        chain.push(el);
     }
 
-    if (!target) {
-        if (appliedRatios.get(video) !== "skip") {
-            appliedRatios.set(video, "skip");
-            logger.warn("No larger ancestor found to fill", ancestors);
+    if (!stage) {
+        if (appliedStages.get(video) !== null) {
+            appliedStages.set(video, null);
+            logger.warn("No larger ancestor to clip at, the zoom stays inside the player", chain.map(describe));
         }
+        clearFill(video);
         return;
     }
 
-    // Keep the width the layout gave us and derive the height from the target's
-    const ratio = `${Math.round(sizerRect.width)} / ${Math.round(target.clientHeight)}`;
-    if (appliedRatios.get(video) === ratio) return;
-    appliedRatios.set(video, ratio);
+    if (appliedStages.get(video) === stage) return;
+    appliedStages.set(video, stage);
 
-    sizer.style.setProperty("--vc-streamfit-ar", ratio);
-    sizer.setAttribute("data-vc-streamfit-sizer", "");
+    clearFill(video);
+    appliedStages.set(video, stage);
 
-    logger.info("fill applied", { ratio, target: describe(target), sizer: describe(sizer), ancestors });
+    for (const el of chain) el.setAttribute("data-vc-streamfit-open", "");
+    stage.setAttribute("data-vc-streamfit-stage", "");
+
+    logger.info("zoom can overflow the player", { chain: chain.map(describe), stage: describe(stage) });
 }
 
 // region detection
