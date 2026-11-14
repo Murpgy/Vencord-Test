@@ -130,10 +130,10 @@ function applyFill(video: HTMLVideoElement) {
     const chain: HTMLElement[] = [];
     let stage: HTMLElement | null = null;
 
-    for (let el = video.parentElement, depth = 0; el && depth < 10; el = el.parentElement, depth++) {
+    for (let el = video.parentElement, depth = 0; el && depth < 24; el = el.parentElement, depth++) {
         if (el !== sizer) {
             const rect = el.getBoundingClientRect();
-            if (rect.height > box.height + 16 && rect.width >= box.width - 8 && rect.width <= window.innerWidth + 1) {
+            if (rect.height > box.height + 16 && rect.width >= Math.min(box.width, window.innerWidth) * 0.5 && rect.width <= window.innerWidth + 1) {
                 stage = el;
                 break;
             }
@@ -145,7 +145,7 @@ function applyFill(video: HTMLVideoElement) {
     if (!stage) {
         if (appliedStages.get(video) !== null) {
             appliedStages.set(video, null);
-            logger.warn("No larger ancestor to clip at, the zoom stays inside the player", chain.map(describe));
+            logger.warn("No larger ancestor to clip at, the zoom stays inside the player:", chain.map(describe).join(" > "));
         }
         clearFill(video);
         return;
@@ -160,7 +160,7 @@ function applyFill(video: HTMLVideoElement) {
     for (const el of chain) el.setAttribute("data-vc-streamfit-open", "");
     stage.setAttribute("data-vc-streamfit-stage", "");
 
-    logger.info("zoom can overflow the player", { chain: chain.map(describe), stage: describe(stage) });
+    logger.info("zoom can overflow the player:", chain.map(describe).join(" > "), "stage:", describe(stage));
 }
 
 // region detection
