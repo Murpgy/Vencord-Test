@@ -17,8 +17,9 @@ const logger = new Logger("CustomIdle");
 /**
  * Discord's notice bar is what Vencord's showNotice feeds, and current Discord builds no longer
  * draw generic notices, so the old prompt silently disappeared and jammed the notice queue.
- * The bar cannot be revived from a plugin, because the component that would draw it belongs to
- * Discord, so the prompt draws itself: a small bar under the titlebar, in the same place.
+ * That bar cannot be revived from a plugin, because the component that would draw it belongs to
+ * Discord, so the prompt draws itself into the shell's own notice grid area, which is the slot
+ * Discord's banners use: it takes up space and pushes the interface down instead of covering it.
  * See https://github.com/Vendicated/Vencord/issues/4802
  */
 
@@ -51,6 +52,11 @@ const settings = definePluginSettings({
     },
     remainInIdle: {
         description: "When you come back to Discord, remain idle until you confirm you want to go online",
+        type: OptionType.BOOLEAN,
+        default: true
+    },
+    dismissablePrompt: {
+        description: "Allow closing the idle prompt without going online. When off, it stays until you click Go online",
         type: OptionType.BOOLEAN,
         default: true
     }
@@ -94,7 +100,11 @@ export default definePlugin({
 
         promptOpen = true;
         try {
-            showIdleBanner(goOnlineFromPrompt, stayIdle);
+            showIdleBanner({
+                dismissable: settings.store.dismissablePrompt,
+                onGoOnline: goOnlineFromPrompt,
+                onStayIdle: stayIdle
+            });
         } catch (err) {
             // Never strand the user in idle because the prompt could not be shown
             promptOpen = false;
