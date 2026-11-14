@@ -1,0 +1,130 @@
+name: Fork Build
+on:
+    push:
+        branches:
+            - main
+        paths:
+            - .github/workflows/fork.yml
+            - src/**
+            - browser/**
+            - scripts/build/**
+            - package.json
+            - pnpm-lock.yaml
+    schedule:
+        - cron: "0 3 * * *"
+    workflow_dispatch:
+        inputs:
+            upstream_ref:
+                description: "Upstream tag or commit to build instead of the latest v* tag"
+                required: false
+                default: ""
+env:
+    FORCE_COLOR: true
+permissions:
+    contents: write
+
+# This is a fork-only copy of the upstream pipeline, kept in its own file so that following
+# upstream never has to merge changes into .github/workflows/build.yml. Upstream's own workflow
+# stays untouched and publishes nothing here, because its publish steps are gated on the
+# Vendicated/Vencord repository.
+jobs:
+    Build:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  fetch-depth: 0
+
+            - name: Resolve upstream release
+              id: upstream
+              env:
+                  UPSTREAM_REF: ${{ github.event.inputs.upstream_ref }}
+              run: |
+                  git fetch --tags --force https://github.com/Vendicated/Vencord.git main:upstream-main
+
+                  case "$UPSTREAM_REF" in
+                      "")
+                          target=$(git describe --tags --abbrev=0 --match 'v*' upstream-main)
+                          ;;
+                      main | master)
+                          target=upstream-main
+                          ;;
+                      *)
+                          target=$(git rev-parse --verify --quiet "$UPSTREAM_REF^{commit}") || {
+                              echo "Unknown upstream ref: $UPSTREAM_REF"
+                              exit 1
+                          }
+                          ;;
+                  esac
+
+                  echo "target=$target" >> "$GITHUB_OUTPUT"
+                  echo "Building from upstream $target"
+
+            - name: Sync with upstream release
+              id: sync
+              if: github.event_name != 'push'
+              run: |
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+                  before=$(git rev-parse HEAD)
+
+                  # Our commits sit on top of an upstream commit. Move only those onto the
+                  # release: a plain rebase onto a tag that is already an ancestor is a no-op
+                  # and would keep upstream's post-release commits in the build.
+                  base=$(git merge-base HEAD upstream-main)
+                  git rebase --onto "${{ steps.upstream.outputs.target }}" "$base"
+
+                  after=$(git rev-parse HEAD)
+
+                  if [ "$before" = "$after" ]; then
+                      echo "Already up to date, nothing to publish"
+                      echo "changed=false" >> "$GITHUB_OUTPUT"
+                  else
+                      echo "changed=true" >> "$GITHUB_OUTPUT"
+                      git push --force-with-lease origin HEAD:main
+                  fi
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+            - name: Use Node.js
+              uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+              with:
+                  node-version: 24
+                  cache: "pnpm"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build web
+              run: pnpm buildWebStandalone
+
+            - name: Build
+              run: pnpm build --standalone
+
+            - name: Generate plugin list
+              run: pnpm generatePluginJson dist/plugins.json dist/plugin-readmes.json
+
+            - name: Clean up obsolete files
+              run: |
+                  rm -rf dist/*-unpacked dist/vendor Vencord.user.css vencordDesktopRenderer.css vencordDesktopRenderer.css.map
+
+            - name: Upload dist
+              uses: actions/upload-artifact@v4
+              with:
+                  name: vencord-dist
+                  path: dist
+                  if-no-files-found: error
+
+            - name: Publish release
+              if: github.event_name == 'push' || steps.sync.outputs.changed == 'true'
+              run: |
+                  tag=$(git rev-parse --short HEAD)
+                  gh release upload devbuild --clobber dist/*
+                  gh release edit devbuild --title "DevBuild $tag" --notes "Upstream: $UPSTREAM_TARGET"
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  UPSTREAM_TARGET: ${{ steps.upstream.outputs.target }}
