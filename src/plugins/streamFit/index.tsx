@@ -4,23 +4,26 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import { definePluginSettings } from "@api/Settings";
 import { Devs } from "@utils/constants";
 import { Logger } from "@utils/Logger";
 import definePlugin, { OptionType } from "@utils/types";
-import { ContextMenuApi, Menu } from "@webpack/common";
+import { Menu } from "@webpack/common";
 
 const logger = new Logger("StreamFit");
 
 const STYLE_ID = "vc-streamfit-styles";
 
-// Discord sizes the player from the stream's own aspect ratio (inline aspect-ratio on an
-// ancestor) and clips the zoomed video inside a wrapper of the same size. Forcing those two
-// attributes is enough to let the stream fill the player and crop instead of letterboxing.
+// The player is pinned to the stream's shape by an inline aspect-ratio on an ancestor. Width and
+// height are taken from the parent's measured size rather than 100%: a percentage height only
+// resolves when the parent has an explicit height, and when it does not the whole player
+// collapses to nothing.
 const CSS = `
 [data-vc-streamfit-sizer] {
     aspect-ratio: auto !important;
-    height: 100% !important;
+    width: var(--vc-streamfit-w) !important;
+    height: var(--vc-streamfit-h) !important;
 }
 [data-vc-streamfit-video] {
     object-fit: cover !important;
@@ -47,11 +50,7 @@ const settings = definePluginSettings({
     cutToContent: {
         description: "Add right-click actions that crop out the bars inside the stream. Requires the option above",
         type: OptionType.BOOLEAN,
-        default: false,
-        onChange: () => {
-            if (settings.store.cutToContent) installContextMenu();
-            else removeContextMenu();
-        }
+        default: false
     }
 });
 
@@ -64,33 +63,81 @@ function forEachStream(fn: (video: HTMLVideoElement) => void) {
     }
 }
 
+function findStreamVideo(): HTMLVideoElement | null {
+    let best: HTMLVideoElement | null = null;
+    let bestArea = 0;
+
+    for (const video of document.querySelectorAll<HTMLVideoElement>("video")) {
+        if (!isStream(video)) continue;
+
+        const rect = video.getBoundingClientRect();
+        const area = rect.width * rect.height;
+        if (area > bestArea) {
+            best = video;
+            bestArea = area;
+        }
+    }
+
+    return best;
+}
+
 // The element whose inline aspect-ratio pins the player to the stream's shape
 function findSizer(video: HTMLVideoElement) {
-    for (let el = video.parentElement, depth = 0; el && depth < 10; el = el.parentElement, depth++) {
+    for (let el = video.parentElement, depth = 0; el && depth < 12; el = el.parentElement, depth++) {
         if (el.style.aspectRatio) return el;
     }
     return null;
 }
 
-function applyFill(video: HTMLVideoElement) {
-    const sizer = findSizer(video);
+function describe(el: Element | null) {
+    if (!el) return "none";
 
-    if (settings.store.unlockAspect) {
-        video.toggleAttribute("data-vc-streamfit-video", true);
-        sizer?.toggleAttribute("data-vc-streamfit-sizer", true);
-    } else {
-        video.removeAttribute("data-vc-streamfit-video");
-        sizer?.removeAttribute("data-vc-streamfit-sizer");
-    }
+    const rect = el.getBoundingClientRect();
+    return `${el.tagName.toLowerCase()}.${String((el as HTMLElement).className).slice(0, 60)} ${Math.round(rect.width)}x${Math.round(rect.height)}`;
 }
 
-function installStyles() {
-    if (document.getElementById(STYLE_ID)) return;
+function applyFill(video: HTMLVideoElement) {
+    const sizer = findSizer(video);
+    const fill = settings.store.unlockAspect;
 
-    const style = document.createElement("style");
-    style.id = STYLE_ID;
-    style.textContent = CSS;
-    document.head.append(style);
+    logger.info("fill", fill ? "on" : "off", "video", describe(video), "sizer", describe(sizer));
+
+    if (!sizer) {
+        logger.warn("No inline aspect-ratio found above the video, cannot fill the player");
+        return;
+    }
+
+    if (!fill) {
+        sizer.removeAttribute("data-vc-streamfit-sizer");
+        sizer.style.removeProperty("--vc-streamfit-w");
+        sizer.style.removeProperty("--vc-streamfit-h");
+        video.removeAttribute("data-vc-streamfit-video");
+        return;
+    }
+
+    const parent = sizer.parentElement;
+    const width = parent?.clientWidth ?? 0;
+    const height = parent?.clientHeight ?? 0;
+
+    logger.info("sizer parent", describe(parent), "usable", width, height);
+
+    // A parent without a real box (display: contents, or height driven by this very child) gives
+    // us nothing to fill, and forcing a size would collapse the player
+    if (width < 160 || height < 120) {
+        logger.warn("Parent has no usable size, leaving the player alone");
+        sizer.removeAttribute("data-vc-streamfit-sizer");
+        video.removeAttribute("data-vc-streamfit-video");
+        return;
+    }
+
+    sizer.style.setProperty("--vc-streamfit-w", `${width}px`);
+    sizer.style.setProperty("--vc-streamfit-h", `${height}px`);
+    sizer.setAttribute("data-vc-streamfit-sizer", "");
+    video.setAttribute("data-vc-streamfit-video", "");
+
+    requestAnimationFrame(() => {
+        logger.info("after fill: video", describe(video), "sizer", describe(sizer));
+    });
 }
 
 // region detection
@@ -147,10 +194,16 @@ function detectContent(video: HTMLVideoElement) {
     const contentWidth = right - left + 1;
     const contentHeight = bottom - top + 1;
 
-    // Refuse to crop when the "content" is most of the frame or almost none of it: that is
-    // either a normally framed stream or a dark scene, not letterboxing
-    if (contentWidth < width * 0.2 || contentHeight < height * 0.2) return null;
-    if (contentWidth > width * 0.98 && contentHeight > height * 0.98) return null;
+    logger.info("detected content", { left, top, right, bottom, contentWidth, contentHeight, width, height });
+
+    if (contentWidth < width * 0.2 || contentHeight < height * 0.2) {
+        logger.warn("Content rect is too small to be letterboxing");
+        return null;
+    }
+    if (contentWidth > width * 0.98 && contentHeight > height * 0.98) {
+        logger.warn("No bars found");
+        return null;
+    }
 
     return {
         left: left / width,
@@ -168,6 +221,7 @@ function clearCrop(video: HTMLVideoElement) {
     crops.delete(video);
     video.style.transform = "";
     video.removeAttribute("data-vc-streamfit-locked");
+    logger.info("crop cleared");
 }
 
 function applyCrop(video: HTMLVideoElement) {
@@ -177,7 +231,10 @@ function applyCrop(video: HTMLVideoElement) {
     const boxWidth = video.clientWidth;
     const boxHeight = video.clientHeight;
     const { videoWidth, videoHeight } = video;
-    if (!boxWidth || !boxHeight || !videoWidth || !videoHeight) return;
+    if (!boxWidth || !boxHeight || !videoWidth || !videoHeight) {
+        logger.warn("Cannot crop, video has no box", { boxWidth, boxHeight, videoWidth, videoHeight });
+        return;
+    }
 
     // Match however the video is currently fitted: cover when we unlocked the ratio, contain
     // otherwise. Either way the content rect is mapped into the player box first.
@@ -201,8 +258,6 @@ function applyCrop(video: HTMLVideoElement) {
     const contentHeight = contentBottom - contentTop;
     if (contentWidth <= 0 || contentHeight <= 0) return;
 
-    // Scale the content up until it covers the player box, then pull its centre onto the
-    // player's centre. Never scale below 1: cropping out bars should not zoom out.
     const zoom = Math.max(boxWidth / contentWidth, boxHeight / contentHeight, 1);
     const centreX = (contentLeft + contentRight) / 2;
     const centreY = (contentTop + contentBottom) / 2;
@@ -211,6 +266,8 @@ function applyCrop(video: HTMLVideoElement) {
 
     video.style.transformOrigin = "50% 50%";
     video.style.transform = `translate(${translateX}px, ${translateY}px) scale(${zoom})`;
+
+    logger.info("crop applied", { zoom, translateX, translateY, boxWidth, boxHeight, contentWidth, contentHeight });
 }
 
 // The scale Discord's own zoom put on the nearest transformed ancestor
@@ -259,12 +316,7 @@ function fitToContent(video: HTMLVideoElement, locked: boolean) {
     }
 
     const rect = detectContent(video);
-    if (!rect) {
-        logger.info("No bars found, leaving the stream as it is");
-        return;
-    }
-
-    logger.info("Content rect:", rect);
+    if (!rect) return;
 
     const previous = crops.get(video);
     if (previous) clearCrop(video);
@@ -277,71 +329,38 @@ function fitToContent(video: HTMLVideoElement, locked: boolean) {
     watchForZoomOut(video, state);
 }
 
-// region context menu
-
-function StreamFitMenu({ video }: { video: HTMLVideoElement }) {
-    const locked = crops.get(video)?.locked === true;
-
-    return (
-        <Menu.Menu navId="vc-streamfit" onClose={ContextMenuApi.closeContextMenu}>
-            <Menu.MenuItem
-                id="vc-streamfit-once"
-                label={locked ? "Re-detect and lock content" : "Zoom to content"}
-                action={() => fitToContent(video, locked)}
-            />
-            <Menu.MenuItem
-                id="vc-streamfit-lock"
-                label={locked ? "Unlock content" : "Lock to content"}
-                action={() => locked ? clearCrop(video) : fitToContent(video, true)}
-            />
-        </Menu.Menu>
-    );
-}
-
-function onContextMenu(event: MouseEvent) {
+const streamContextPatch: NavContextMenuPatchCallback = (children, { target }: { target?: HTMLElement; }) => {
     if (!settings.store.cutToContent) return;
 
-    // Bound to the video itself, so currentTarget is the element Discord anchors the menu to
-    const video = event.currentTarget as HTMLVideoElement;
-    if (!isStream(video)) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-
-    try {
-        ContextMenuApi.openContextMenu(event as any, () => <StreamFitMenu video={video} />);
-    } catch (err) {
-        logger.error("Could not open the stream menu", err);
+    const video = target?.querySelector("video") ?? findStreamVideo();
+    if (!video || !isStream(video)) {
+        logger.warn("Could not find the stream video for this menu");
+        return;
     }
-}
 
-// addEventListener ignores duplicates of the same handler, so this is safe to call repeatedly
-function bindVideo(video: HTMLVideoElement) {
-    video.addEventListener("contextmenu", onContextMenu);
-}
+    const locked = crops.get(video)?.locked === true;
 
-function unbindVideos() {
-    document.querySelectorAll("video").forEach(video => {
-        video.removeEventListener("contextmenu", onContextMenu);
-    });
-}
-
-function installContextMenu() {
-    forEachStream(bindVideo);
-}
-
-function removeContextMenu() {
-    unbindVideos();
-}
-
-// endregion
+    children.push(
+        <Menu.MenuSeparator key="vc-streamfit-sep" />,
+        <Menu.MenuItem
+            id="vc-streamfit-once"
+            label={locked ? "Re-detect and lock content" : "Zoom to content"}
+            action={() => fitToContent(video, locked)}
+        />,
+        <Menu.MenuItem
+            id="vc-streamfit-lock"
+            label={locked ? "Unlock content" : "Lock to content"}
+            action={() => locked ? clearCrop(video) : fitToContent(video, true)}
+        />
+    );
+};
 
 function onMediaEvent(event: Event) {
     const video = event.target as HTMLVideoElement;
     if (video.tagName !== "VIDEO" || !isStream(video)) return;
 
+    logger.info("stream video seen", describe(video));
     applyFill(video);
-    if (settings.store.cutToContent) bindVideo(video);
     if (crops.has(video)) applyCrop(video);
 }
 
@@ -352,26 +371,35 @@ export default definePlugin({
     authors: [Devs.Murpgy],
     settings,
 
+    contextMenus: {
+        "stream-context": streamContextPatch
+    },
+
     start() {
-        installStyles();
+        const style = document.createElement("style");
+        style.id = STYLE_ID;
+        style.textContent = CSS;
+        document.head.append(style);
 
         // Media events do not bubble, so listen in the capture phase
         document.addEventListener("playing", onMediaEvent, true);
         document.addEventListener("resize", onMediaEvent, true);
 
-        if (settings.store.cutToContent) installContextMenu();
+        logger.info("started");
     },
 
     stop() {
         document.removeEventListener("playing", onMediaEvent, true);
         document.removeEventListener("resize", onMediaEvent, true);
-        removeContextMenu();
         document.getElementById(STYLE_ID)?.remove();
 
         for (const video of crops.keys()) clearCrop(video);
         forEachStream(video => {
             video.removeAttribute("data-vc-streamfit-video");
-            findSizer(video)?.removeAttribute("data-vc-streamfit-sizer");
+            const sizer = findSizer(video);
+            sizer?.removeAttribute("data-vc-streamfit-sizer");
+            sizer?.style.removeProperty("--vc-streamfit-w");
+            sizer?.style.removeProperty("--vc-streamfit-h");
         });
     }
 });
