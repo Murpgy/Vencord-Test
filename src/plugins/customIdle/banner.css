@@ -1,0 +1,71 @@
+.vc-idle-banner {
+    position: relative;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    min-height: 36px;
+    padding: 0 36px;
+    background: var(--status-positive-background, var(--background-base-low));
+    color: var(--status-positive-text, var(--text-strong));
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 18px;
+    text-align: center;
+}
+
+/* Only the docked variant can inherit the shell's frame, since it sits in the notice slot */
+.vc-idle-banner-docked {
+    border-top: 1px solid var(--app-frame-border);
+    border-inline-start: 1px solid var(--app-frame-border);
+    border-radius: 8px 0 0;
+}
+
+.vc-idle-banner-floating {
+    width: 100%;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.24);
+}
+
+.vc-idle-banner-button {
+    flex-shrink: 0;
+    height: 24px;
+    padding: 0 10px;
+    border: 1px solid currentcolor;
+    border-radius: 3px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 22px;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+}
+
+.vc-idle-banner-button:hover {
+    background-color: rgb(255 255 255 / 10%);
+}
+
+.vc-idle-banner-close {
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    cursor: pointer;
+    opacity: 0.9;
+}
+
+.vc-idle-banner-close:hover {
+    opacity: 1;
+}

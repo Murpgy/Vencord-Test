@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import "./banner.css";
+
 import { createRoot } from "@webpack/common";
 import type { Root } from "react-dom/client";
 
@@ -89,61 +91,22 @@ export function showIdleBanner({ dismissable, onGoOnline, onStayIdle }: IdleBann
     root = createRoot(container);
 
     root.render(
-        <div
-            role="status"
-            style={{
-                boxSizing: "border-box",
-                display: "flex",
-                alignItems: "center",
-                gap: 16,
-                minHeight: 36,
-                padding: "4px 12px 4px 16px",
-                // The same pair Discord's own notice bar uses, so it follows the theme's green
-                background: docked ? "var(--notice-background-positive, var(--background-base-low))" : "var(--background-base-low)",
-                color: docked ? "var(--notice-text-positive, var(--text-default))" : "var(--text-default)",
-                borderBottom: docked ? "1px solid var(--app-frame-border)" : undefined,
-                border: docked ? undefined : "1px solid var(--border-subtle)",
-                borderRadius: docked ? undefined : 8,
-                boxShadow: docked ? undefined : "0 8px 16px rgba(0, 0, 0, 0.24)",
-                fontSize: 14,
-                lineHeight: "18px"
-            }}
-        >
-            <span style={{ flexGrow: 1 }}>
-                <strong>You're idle.</strong> Go online if you are back at the keyboard.
+        <div role="status" className={`vc-idle-banner ${docked ? "vc-idle-banner-docked" : "vc-idle-banner-floating"}`}>
+            <span>
+                Welcome back! Click the button to go online.
+                {dismissable && " Click the X to stay idle for now."}
             </span>
-            <button
-                type="button"
-                onClick={() => close(onGoOnline)}
-                style={{
-                    all: "unset",
-                    cursor: "pointer",
-                    padding: "4px 8px",
-                    borderRadius: 4,
-                    color: "inherit",
-                    fontWeight: 600,
-                    textDecoration: "underline",
-                    whiteSpace: "nowrap"
-                }}
-            >
-                Go online
+            <button type="button" className="vc-idle-banner-button" onClick={() => close(onGoOnline)}>
+                Exit idle
             </button>
             {dismissable && (
-                <button
-                    type="button"
-                    aria-label="Stay idle"
-                    onClick={() => close(onStayIdle)}
-                    style={{
-                        all: "unset",
-                        cursor: "pointer",
-                        padding: "0 4px",
-                        color: "inherit",
-                        opacity: 0.7,
-                        fontSize: 18,
-                        lineHeight: 1
-                    }}
-                >
-                    &times;
+                <button type="button" className="vc-idle-banner-close" aria-label="Stay idle" onClick={() => close(onStayIdle)}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden>
+                        <path
+                            fill="currentColor"
+                            d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"
+                        />
+                    </svg>
                 </button>
             )}
         </div>
