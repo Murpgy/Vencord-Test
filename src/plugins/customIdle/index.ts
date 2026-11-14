@@ -4,20 +4,21 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
 import { Devs } from "@utils/constants";
 import { Logger } from "@utils/Logger";
 import definePlugin, { makeRange, OptionType } from "@utils/types";
 import { FluxDispatcher } from "@webpack/common";
 
+import { hideIdleBanner, showIdleBanner } from "./Banner";
+
 const logger = new Logger("CustomIdle");
 
 /**
- * Vencord's notice banner (showNotice) is no longer rendered by current Discord builds, and a
- * notice that never renders is never dismissed, so it permanently jams Vencord's notice queue.
- * The "welcome back, go online?" prompt therefore uses a notification toast instead: it is
- * rendered by Vencord's own React root and is unaffected by Discord's notice component.
+ * Discord's notice bar is what Vencord's showNotice feeds, and current Discord builds no longer
+ * draw generic notices, so the old prompt silently disappeared and jammed the notice queue.
+ * The bar cannot be revived from a plugin, because the component that would draw it belongs to
+ * Discord, so the prompt draws itself: a small bar under the titlebar, in the same place.
  * See https://github.com/Vendicated/Vencord/issues/4802
  */
 
@@ -28,6 +29,17 @@ let promptOpen = false;
 let lastPromptClosedAt = 0;
 
 const goOnline = () => FluxDispatcher.dispatch({ type: "IDLE", idle: false });
+
+const stayIdle = () => {
+    promptOpen = false;
+    lastPromptClosedAt = Date.now();
+};
+
+const goOnlineFromPrompt = () => {
+    promptOpen = false;
+    lastPromptClosedAt = 0;
+    goOnline();
+};
 
 const settings = definePluginSettings({
     idleTimeout: {
@@ -78,30 +90,22 @@ export default definePlugin({
             return;
         }
 
-        // A live toast sits at the head of Vencord's notification queue until it is closed,
-        // so never push a second one while the prompt is still up.
         if (promptOpen || Date.now() - lastPromptClosedAt < REPROMPT_DELAY) return;
 
         promptOpen = true;
-        showNotification({
-            title: "You're idle",
-            body: "Click this notification to go online. Click the \u00d7 to stay idle for now.",
-            // Stays until acted on: a timed toast could vanish before the user notices it,
-            // which would leave them idle with no affordance. Switch to false if you would
-            // rather not block Vencord's other notifications while the prompt is ignored.
-            permanent: true,
-            noPersist: true,
-            onClick: goOnline,
-            onClose: () => {
-                promptOpen = false;
-                lastPromptClosedAt = Date.now();
-            }
-        }).catch(err => {
+        try {
+            showIdleBanner(goOnlineFromPrompt, stayIdle);
+        } catch (err) {
             // Never strand the user in idle because the prompt could not be shown
             promptOpen = false;
             logger.error("Failed to show the go-online prompt, going online instead", err);
             goOnline();
-        });
+        }
+    },
+
+    stop() {
+        hideIdleBanner();
+        promptOpen = false;
     },
 
     getIdleTimeout() { // milliseconds, default is 6e5
