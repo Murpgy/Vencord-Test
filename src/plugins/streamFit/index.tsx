@@ -15,15 +15,13 @@ const logger = new Logger("StreamFit");
 
 const STYLE_ID = "vc-streamfit-styles";
 
-// The player is pinned to the stream's shape by an inline aspect-ratio on an ancestor. Width and
-// height are taken from the parent's measured size rather than 100%: a percentage height only
-// resolves when the parent has an explicit height, and when it does not the whole player
-// collapses to nothing.
+// The player is pinned to the stream's shape by an inline aspect-ratio on an ancestor. Rewriting
+// that ratio to the parent's own is enough to make the player fill it: width already comes from
+// the parent, so the height follows. Sizing the element directly instead makes its parent resize,
+// which makes us resize it again, which is how you turn Discord into a space heater.
 const CSS = `
 [data-vc-streamfit-sizer] {
-    aspect-ratio: auto !important;
-    width: var(--vc-streamfit-w) !important;
-    height: var(--vc-streamfit-h) !important;
+    aspect-ratio: var(--vc-streamfit-ar) !important;
 }
 [data-vc-streamfit-video] {
     object-fit: cover !important;
@@ -39,6 +37,9 @@ interface CropState {
 }
 
 const crops = new Map<HTMLVideoElement, CropState>();
+
+// Last ratio applied to a video, so repeated events do not redo the same work
+const appliedRatios = new WeakMap<HTMLVideoElement, string>();
 
 const settings = definePluginSettings({
     unlockAspect: {
@@ -96,48 +97,67 @@ function describe(el: Element | null) {
     return `${el.tagName.toLowerCase()}.${String((el as HTMLElement).className).slice(0, 60)} ${Math.round(rect.width)}x${Math.round(rect.height)}`;
 }
 
-function applyFill(video: HTMLVideoElement) {
+function clearFill(video: HTMLVideoElement) {
     const sizer = findSizer(video);
-    const fill = settings.store.unlockAspect;
 
-    logger.info("fill", fill ? "on" : "off", "video", describe(video), "sizer", describe(sizer));
+    sizer?.removeAttribute("data-vc-streamfit-sizer");
+    sizer?.style.removeProperty("--vc-streamfit-ar");
+    video.removeAttribute("data-vc-streamfit-video");
+    appliedRatios.delete(video);
+}
 
+function applyFill(video: HTMLVideoElement) {
+    if (!settings.store.unlockAspect) {
+        clearFill(video);
+        return;
+    }
+
+    const sizer = findSizer(video);
     if (!sizer) {
-        logger.warn("No inline aspect-ratio found above the video, cannot fill the player");
+        logger.warn("No inline aspect-ratio found above the video", describe(video));
         return;
     }
 
-    if (!fill) {
-        sizer.removeAttribute("data-vc-streamfit-sizer");
-        sizer.style.removeProperty("--vc-streamfit-w");
-        sizer.style.removeProperty("--vc-streamfit-h");
-        video.removeAttribute("data-vc-streamfit-video");
+    const sizerRect = sizer.getBoundingClientRect();
+    if (sizerRect.width < 160) {
+        if (appliedRatios.get(video) !== "skip") {
+            appliedRatios.set(video, "skip");
+            logger.warn("Sizer has no usable width, leaving the player alone", describe(sizer));
+        }
         return;
     }
 
-    const parent = sizer.parentElement;
-    const width = parent?.clientWidth ?? 0;
-    const height = parent?.clientHeight ?? 0;
+    // The parent is often sized by this very element, so walking up to the first ancestor that is
+    // already taller than the player is what actually finds the area the player should fill
+    let target: HTMLElement | null = null;
+    const ancestors: string[] = [];
 
-    logger.info("sizer parent", describe(parent), "usable", width, height);
+    for (let el = sizer.parentElement, depth = 0; el && depth < 8; el = el.parentElement, depth++) {
+        const rect = el.getBoundingClientRect();
+        ancestors.push(describe(el));
 
-    // A parent without a real box (display: contents, or height driven by this very child) gives
-    // us nothing to fill, and forcing a size would collapse the player
-    if (width < 160 || height < 120) {
-        logger.warn("Parent has no usable size, leaving the player alone");
-        sizer.removeAttribute("data-vc-streamfit-sizer");
-        video.removeAttribute("data-vc-streamfit-video");
+        if (!target && rect.height > sizerRect.height + 16 && rect.width >= sizerRect.width - 8 && rect.width <= window.innerWidth + 1)
+            target = el;
+    }
+
+    if (!target) {
+        if (appliedRatios.get(video) !== "skip") {
+            appliedRatios.set(video, "skip");
+            logger.warn("No larger ancestor found to fill", ancestors);
+        }
         return;
     }
 
-    sizer.style.setProperty("--vc-streamfit-w", `${width}px`);
-    sizer.style.setProperty("--vc-streamfit-h", `${height}px`);
+    // Keep the width the layout gave us and derive the height from the target's
+    const ratio = `${Math.round(sizerRect.width)} / ${Math.round(target.clientHeight)}`;
+    if (appliedRatios.get(video) === ratio) return;
+    appliedRatios.set(video, ratio);
+
+    sizer.style.setProperty("--vc-streamfit-ar", ratio);
     sizer.setAttribute("data-vc-streamfit-sizer", "");
     video.setAttribute("data-vc-streamfit-video", "");
 
-    requestAnimationFrame(() => {
-        logger.info("after fill: video", describe(video), "sizer", describe(sizer));
-    });
+    logger.info("fill applied", { ratio, target: describe(target), sizer: describe(sizer), ancestors });
 }
 
 // region detection
@@ -342,15 +362,18 @@ const streamContextPatch: NavContextMenuPatchCallback = (children, { target }: {
 
     children.push(
         <Menu.MenuSeparator key="vc-streamfit-sep" />,
+        <Menu.MenuCheckboxItem
+            key="vc-streamfit-lock"
+            id="vc-streamfit-lock"
+            label="Lock to content"
+            checked={locked}
+            action={() => locked ? clearCrop(video) : fitToContent(video, true)}
+        />,
         <Menu.MenuItem
+            key="vc-streamfit-once"
             id="vc-streamfit-once"
             label={locked ? "Re-detect and lock content" : "Zoom to content"}
             action={() => fitToContent(video, locked)}
-        />,
-        <Menu.MenuItem
-            id="vc-streamfit-lock"
-            label={locked ? "Unlock content" : "Lock to content"}
-            action={() => locked ? clearCrop(video) : fitToContent(video, true)}
         />
     );
 };
@@ -359,9 +382,15 @@ function onMediaEvent(event: Event) {
     const video = event.target as HTMLVideoElement;
     if (video.tagName !== "VIDEO" || !isStream(video)) return;
 
-    logger.info("stream video seen", describe(video));
     applyFill(video);
     if (crops.has(video)) applyCrop(video);
+}
+
+let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+
+function onWindowResize() {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => forEachStream(applyFill), 250);
 }
 
 export default definePlugin({
@@ -383,23 +412,22 @@ export default definePlugin({
 
         // Media events do not bubble, so listen in the capture phase
         document.addEventListener("playing", onMediaEvent, true);
-        document.addEventListener("resize", onMediaEvent, true);
 
+        // Only the window resizing changes the parent box; watching the video's own resize events
+        // turns the fill into a layout feedback loop
+        window.addEventListener("resize", onWindowResize);
+
+        forEachStream(applyFill);
         logger.info("started");
     },
 
     stop() {
         document.removeEventListener("playing", onMediaEvent, true);
-        document.removeEventListener("resize", onMediaEvent, true);
+        window.removeEventListener("resize", onWindowResize);
+        clearTimeout(resizeTimer);
         document.getElementById(STYLE_ID)?.remove();
 
         for (const video of crops.keys()) clearCrop(video);
-        forEachStream(video => {
-            video.removeAttribute("data-vc-streamfit-video");
-            const sizer = findSizer(video);
-            sizer?.removeAttribute("data-vc-streamfit-sizer");
-            sizer?.style.removeProperty("--vc-streamfit-w");
-            sizer?.style.removeProperty("--vc-streamfit-h");
-        });
+        forEachStream(clearFill);
     }
 });
