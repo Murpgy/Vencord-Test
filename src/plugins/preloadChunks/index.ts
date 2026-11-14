@@ -120,7 +120,18 @@ export default definePlugin({
                 scheduleSave();
             }
 
-            return originalEnsure!.call(wreq, chunkId);
+            const started = performance.now();
+            const promise = originalEnsure!.call(wreq, chunkId);
+
+            // Anything slow is worth naming: it tells us whether a laggy menu is waiting on
+            // code at all, and which chunk it is
+            const report = () => {
+                const took = performance.now() - started;
+                if (took > 250) logger.info(`chunk ${String(chunkId)} took ${Math.round(took)}ms`);
+            };
+            void promise.then(report, report);
+
+            return promise;
         };
 
         warmTimeout = setTimeout(
