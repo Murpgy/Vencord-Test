@@ -7,8 +7,8 @@
     gap: 10px;
     min-height: 36px;
     padding: 0 36px;
-    background: var(--status-positive-background, var(--background-base-low));
-    color: var(--status-positive-text, var(--text-strong));
+    background: var(--notice-background-positive, var(--background-base-low));
+    color: var(--notice-text-positive, var(--text-strong));
     font-size: 14px;
     font-weight: 500;
     line-height: 18px;
@@ -46,7 +46,7 @@
 }
 
 .vc-idle-banner-button:hover {
-    background-color: rgb(255 255 255 / 10%);
+    background-color: color-mix(in srgb, currentcolor 15%, transparent);
 }
 
 .vc-idle-banner-close {
