@@ -16,15 +16,12 @@ const logger = new Logger("StreamFit");
 const STYLE_ID = "vc-streamfit-styles";
 
 // The player is pinned to the stream's shape by an inline aspect-ratio on an ancestor. Rewriting
-// that ratio to the parent's own is enough to make the player fill it: width already comes from
-// the parent, so the height follows. Sizing the element directly instead makes its parent resize,
-// which makes us resize it again, which is how you turn Discord into a space heater.
+// that ratio to the target's own is enough to make the player fill it: the width already comes
+// from the layout, so the height follows. The video keeps its own fit inside that box, so 100%
+// still shows the whole picture and zooming is what crops it.
 const CSS = `
 [data-vc-streamfit-sizer] {
     aspect-ratio: var(--vc-streamfit-ar) !important;
-}
-[data-vc-streamfit-video] {
-    object-fit: cover !important;
 }
 `;
 
@@ -102,7 +99,6 @@ function clearFill(video: HTMLVideoElement) {
 
     sizer?.removeAttribute("data-vc-streamfit-sizer");
     sizer?.style.removeProperty("--vc-streamfit-ar");
-    video.removeAttribute("data-vc-streamfit-video");
     appliedRatios.delete(video);
 }
 
@@ -155,7 +151,6 @@ function applyFill(video: HTMLVideoElement) {
 
     sizer.style.setProperty("--vc-streamfit-ar", ratio);
     sizer.setAttribute("data-vc-streamfit-sizer", "");
-    video.setAttribute("data-vc-streamfit-video", "");
 
     logger.info("fill applied", { ratio, target: describe(target), sizer: describe(sizer), ancestors });
 }
@@ -256,12 +251,8 @@ function applyCrop(video: HTMLVideoElement) {
         return;
     }
 
-    // Match however the video is currently fitted: cover when we unlocked the ratio, contain
-    // otherwise. Either way the content rect is mapped into the player box first.
-    const cover = settings.store.unlockAspect;
-    const scale = cover
-        ? Math.max(boxWidth / videoWidth, boxHeight / videoHeight)
-        : Math.min(boxWidth / videoWidth, boxHeight / videoHeight);
+    // The video is contained inside the player box, so the content rect maps through that fit
+    const scale = Math.min(boxWidth / videoWidth, boxHeight / videoHeight);
 
     const renderedWidth = videoWidth * scale;
     const renderedHeight = videoHeight * scale;
