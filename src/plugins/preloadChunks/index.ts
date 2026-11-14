@@ -83,21 +83,33 @@ async function warmChunks() {
     if (ids.length === 0) return;
 
     const start = performance.now();
+    const queue = ids.slice();
+    const slow: Array<[number, number]> = [];
     let loaded = 0;
 
-    for (const id of ids) {
-        try {
-            await originalEnsure.call(wreq, id);
-            loaded++;
-        } catch (err) {
-            logger.warn(`Failed to load chunk ${id}`, err);
+    // A few in flight at once: each chunk is its own file, so the only way to batch them is to
+    // stop awaiting them one by one
+    const worker = async () => {
+        for (let id = queue.shift(); id !== undefined; id = queue.shift()) {
+            const started = performance.now();
+            try {
+                await originalEnsure!.call(wreq, id);
+                loaded++;
+
+                const took = performance.now() - started;
+                if (took > 250) slow.push([id, took]);
+            } catch (err) {
+                logger.warn(`Failed to load chunk ${id}`, err);
+            }
         }
+    };
 
-        // Spread the work out instead of blocking one long task
-        await new Promise(resolve => setTimeout(resolve, 50));
-    }
+    await Promise.all(Array.from({ length: Math.min(4, ids.length) }, worker));
 
-    logger.info(`Preloaded ${loaded}/${ids.length} chunks in ${Math.round(performance.now() - start)}ms`);
+    slow.sort((a, b) => b[1] - a[1]);
+    const slowest = slow.slice(0, 5).map(([id, took]) => `${id} ${Math.round(took)}ms`).join(", ");
+
+    logger.info(`Preloaded ${loaded}/${ids.length} chunks in ${Math.round(performance.now() - start)}ms${slowest ? `, slowest: ${slowest}` : ""}`);
 }
 
 export default definePlugin({
@@ -127,7 +139,7 @@ export default definePlugin({
             // code at all, and which chunk it is
             const report = () => {
                 const took = performance.now() - started;
-                if (took > 250) logger.info(`chunk ${String(chunkId)} took ${Math.round(took)}ms`);
+                if (took > 1000) logger.info(`chunk ${String(chunkId)} took ${Math.round(took)}ms`);
             };
             void promise.then(report, report);
 
