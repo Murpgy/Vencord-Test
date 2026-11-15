@@ -172,11 +172,39 @@ function applyFill(video: HTMLVideoElement) {
     // Always refresh the markers: Discord rebuilds parts of this chain on zoom and on fullscreen
     // transitions, and the attributes do not survive a replaced element
     const stageChanged = appliedStages.get(video) !== stage;
-    for (const el of chain) el.setAttribute("data-vc-streamfit-open", "");
-    stage.setAttribute("data-vc-streamfit-stage", "");
+    for (const el of chain) {
+        if (!el.hasAttribute("data-vc-streamfit-open")) el.setAttribute("data-vc-streamfit-open", "");
+    }
+    if (!stage.hasAttribute("data-vc-streamfit-stage")) stage.setAttribute("data-vc-streamfit-stage", "");
     appliedStages.set(video, stage);
+    observeStage(stage);
 
-    if (stageChanged) logger.info("zoom can overflow the player:", chain.map(describe).join(" > "), "stage:", describe(stage));
+    if (stageChanged) {
+        logger.info(
+            "zoom can overflow the player:",
+            chain.map(el => `${describe(el)} overflow=${getComputedStyle(el).overflow}`).join(" > "),
+            "stage:",
+            `${describe(stage)} overflow=${getComputedStyle(stage).overflow}`
+        );
+    }
+}
+
+// Discord re-renders the tile while zooming and on fullscreen transitions; watch the stage so a
+// rebuilt chain gets its markers back without waiting for the next random event
+const observedStages = new WeakSet<HTMLElement>();
+let stageObserver: MutationObserver | null = null;
+let repairTimer: ReturnType<typeof setTimeout> | undefined;
+
+function observeStage(stage: HTMLElement) {
+    if (observedStages.has(stage)) return;
+    observedStages.add(stage);
+
+    stageObserver ??= new MutationObserver(() => {
+        clearTimeout(repairTimer);
+        repairTimer = setTimeout(() => forEachStream(applyFill), 100);
+    });
+
+    stageObserver.observe(stage, { subtree: true, attributes: true, attributeFilter: ["class", "style"], childList: true });
 }
 
 // region detection
@@ -475,6 +503,9 @@ export default definePlugin({
         window.removeEventListener("resize", onWindowResize);
         clearTimeout(layoutTimer);
         clearTimeout(wheelTimer);
+        clearTimeout(repairTimer);
+        stageObserver?.disconnect();
+        stageObserver = null;
         clearTimeout(resizeTimer);
         document.getElementById(STYLE_ID)?.remove();
 
