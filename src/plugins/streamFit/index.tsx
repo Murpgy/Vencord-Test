@@ -98,7 +98,7 @@ function describe(el: Element | null) {
 }
 
 function clearFill(video: HTMLVideoElement) {
-    for (let el = video.parentElement, depth = 0; el && depth < 12; el = el.parentElement, depth++) {
+    for (let el = video.parentElement, depth = 0; el && depth < 24; el = el.parentElement, depth++) {
         el.removeAttribute("data-vc-streamfit-open");
         el.removeAttribute("data-vc-streamfit-stage");
     }
@@ -112,6 +112,14 @@ function applyFill(video: HTMLVideoElement) {
         return;
     }
 
+    // Only the stream the user is actually watching: marking the minimap walks through Discord's
+    // control overlay, which is exactly what breaks fullscreen
+    const main = findStreamVideo();
+    if (main && main !== video) {
+        clearFill(video);
+        return;
+    }
+
     const sizer = findSizer(video);
     if (!sizer) {
         logger.warn("No inline aspect-ratio found above the video", describe(video));
@@ -121,6 +129,17 @@ function applyFill(video: HTMLVideoElement) {
     const box = sizer.getBoundingClientRect();
     if (box.width < 160 || box.height < 100) {
         logger.warn("Player box has no usable size", describe(sizer));
+        return;
+    }
+
+    // Fullscreen already has the whole window; there is no empty space to fill, and the markers
+    // only get in the way of the fullscreen controls
+    const fullscreenish = box.width >= window.innerWidth - 40 && box.height >= window.innerHeight - 140;
+    if (document.fullscreenElement || fullscreenish) {
+        if (appliedStages.get(video) !== null) {
+            logger.info("Player is fullscreen, leaving the layout alone");
+        }
+        clearFill(video);
         return;
     }
 
@@ -377,12 +396,34 @@ const streamContextPatch: NavContextMenuPatchCallback = (children, { target }: {
     );
 };
 
+let layoutTimer: ReturnType<typeof setTimeout> | undefined;
+
 function onMediaEvent(event: Event) {
     const video = event.target as HTMLVideoElement;
     if (video.tagName !== "VIDEO" || !isStream(video)) return;
 
-    applyFill(video);
-    if (crops.has(video)) applyCrop(video);
+    // The element resizes when Discord enters fullscreen or changes the layout; the crop was
+    // computed for the old box, which is what left the picture zoomed and pushed to one side
+    clearTimeout(layoutTimer);
+    layoutTimer = setTimeout(() => {
+        applyFill(video);
+        if (crops.has(video)) applyCrop(video);
+    }, 150);
+}
+
+function onFullscreenChange() {
+    logger.info("fullscreen", document.fullscreenElement ? "entered" : "exited");
+
+    // The transform was computed for the old box, so it has to go; the crop itself stays in the
+    // map so a lock survives the trip through fullscreen
+    for (const video of crops.keys()) video.style.transform = "";
+
+    forEachStream(clearFill);
+
+    setTimeout(() => {
+        forEachStream(applyFill);
+        for (const video of crops.keys()) applyCrop(video);
+    }, 300);
 }
 
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -411,6 +452,8 @@ export default definePlugin({
 
         // Media events do not bubble, so listen in the capture phase
         document.addEventListener("playing", onMediaEvent, true);
+        document.addEventListener("resize", onMediaEvent, true);
+        document.addEventListener("fullscreenchange", onFullscreenChange);
 
         // Only the window resizing changes the parent box; watching the video's own resize events
         // turns the fill into a layout feedback loop
@@ -422,7 +465,10 @@ export default definePlugin({
 
     stop() {
         document.removeEventListener("playing", onMediaEvent, true);
+        document.removeEventListener("resize", onMediaEvent, true);
+        document.removeEventListener("fullscreenchange", onFullscreenChange);
         window.removeEventListener("resize", onWindowResize);
+        clearTimeout(layoutTimer);
         clearTimeout(resizeTimer);
         document.getElementById(STYLE_ID)?.remove();
 
