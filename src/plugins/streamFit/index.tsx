@@ -132,17 +132,6 @@ function applyFill(video: HTMLVideoElement) {
         return;
     }
 
-    // Fullscreen already has the whole window; there is no empty space to fill, and the markers
-    // only get in the way of the fullscreen controls
-    const fullscreenish = box.width >= window.innerWidth - 40 && box.height >= window.innerHeight - 140;
-    if (document.fullscreenElement || fullscreenish) {
-        if (appliedStages.get(video) !== null) {
-            logger.info("Player is fullscreen, leaving the layout alone");
-        }
-        clearFill(video);
-        return;
-    }
-
     // Everything between the video and the first ancestor that is already larger than the player
     // can be allowed to show overflow; the player box itself stays exactly as it is, so 100%
     // still looks like it used to
@@ -152,7 +141,7 @@ function applyFill(video: HTMLVideoElement) {
     for (let el = video.parentElement, depth = 0; el && depth < 24; el = el.parentElement, depth++) {
         if (el !== sizer) {
             const rect = el.getBoundingClientRect();
-            if (rect.height > box.height + 16 && rect.width >= Math.min(box.width, window.innerWidth) * 0.5 && rect.width <= window.innerWidth + 1) {
+            if (rect.height > box.height + 16 && rect.width >= Math.min(box.width, window.innerWidth) * 0.5) {
                 stage = el;
                 break;
             }
@@ -170,16 +159,24 @@ function applyFill(video: HTMLVideoElement) {
         return;
     }
 
-    if (appliedStages.get(video) === stage) return;
-    appliedStages.set(video, stage);
+    const stageRect = stage.getBoundingClientRect();
 
-    clearFill(video);
-    appliedStages.set(video, stage);
+    // The player already fills the stage (fullscreen): nothing to expand into, and the markers
+    // would only get in the way of the fullscreen controls
+    if (box.width >= stageRect.width - 8 && box.height >= stageRect.height - 8) {
+        if (appliedStages.get(video) !== null) logger.info("Player already fills the stage, leaving the layout alone");
+        clearFill(video);
+        return;
+    }
 
+    // Always refresh the markers: Discord rebuilds parts of this chain on zoom and on fullscreen
+    // transitions, and the attributes do not survive a replaced element
+    const stageChanged = appliedStages.get(video) !== stage;
     for (const el of chain) el.setAttribute("data-vc-streamfit-open", "");
     stage.setAttribute("data-vc-streamfit-stage", "");
+    appliedStages.set(video, stage);
 
-    logger.info("zoom can overflow the player:", chain.map(describe).join(" > "), "stage:", describe(stage));
+    if (stageChanged) logger.info("zoom can overflow the player:", chain.map(describe).join(" > "), "stage:", describe(stage));
 }
 
 // region detection
@@ -397,6 +394,12 @@ const streamContextPatch: NavContextMenuPatchCallback = (children, { target }: {
 };
 
 let layoutTimer: ReturnType<typeof setTimeout> | undefined;
+let wheelTimer: ReturnType<typeof setTimeout> | undefined;
+
+function onWheel() {
+    clearTimeout(wheelTimer);
+    wheelTimer = setTimeout(() => forEachStream(applyFill), 200);
+}
 
 function onMediaEvent(event: Event) {
     const video = event.target as HTMLVideoElement;
@@ -454,6 +457,7 @@ export default definePlugin({
         document.addEventListener("playing", onMediaEvent, true);
         document.addEventListener("resize", onMediaEvent, true);
         document.addEventListener("fullscreenchange", onFullscreenChange);
+        document.addEventListener("wheel", onWheel, true);
 
         // Only the window resizing changes the parent box; watching the video's own resize events
         // turns the fill into a layout feedback loop
@@ -467,8 +471,10 @@ export default definePlugin({
         document.removeEventListener("playing", onMediaEvent, true);
         document.removeEventListener("resize", onMediaEvent, true);
         document.removeEventListener("fullscreenchange", onFullscreenChange);
+        document.removeEventListener("wheel", onWheel, true);
         window.removeEventListener("resize", onWindowResize);
         clearTimeout(layoutTimer);
+        clearTimeout(wheelTimer);
         clearTimeout(resizeTimer);
         document.getElementById(STYLE_ID)?.remove();
 
