@@ -98,7 +98,7 @@ function describe(el: Element | null) {
 }
 
 function clearFill(video: HTMLVideoElement) {
-    for (let el = video.parentElement, depth = 0; el && depth < 24; el = el.parentElement, depth++) {
+    for (let el = video.parentElement, depth = 0; el && depth < 12; el = el.parentElement, depth++) {
         el.removeAttribute("data-vc-streamfit-open");
         el.removeAttribute("data-vc-streamfit-stage");
     }
@@ -108,14 +108,6 @@ function clearFill(video: HTMLVideoElement) {
 
 function applyFill(video: HTMLVideoElement) {
     if (!settings.store.unlockAspect) {
-        clearFill(video);
-        return;
-    }
-
-    // Only the stream the user is actually watching: marking the minimap walks through Discord's
-    // control overlay, which is exactly what breaks fullscreen
-    const main = findStreamVideo();
-    if (main && main !== video) {
         clearFill(video);
         return;
     }
@@ -141,7 +133,7 @@ function applyFill(video: HTMLVideoElement) {
     for (let el = video.parentElement, depth = 0; el && depth < 24; el = el.parentElement, depth++) {
         if (el !== sizer) {
             const rect = el.getBoundingClientRect();
-            if (rect.height > box.height + 16 && rect.width >= Math.min(box.width, window.innerWidth) * 0.5) {
+            if (rect.height > box.height + 16 && rect.width >= Math.min(box.width, window.innerWidth) * 0.5 && rect.width <= window.innerWidth + 1) {
                 stage = el;
                 break;
             }
@@ -159,52 +151,16 @@ function applyFill(video: HTMLVideoElement) {
         return;
     }
 
-    const stageRect = stage.getBoundingClientRect();
-
-    // The player already fills the stage (fullscreen): nothing to expand into, and the markers
-    // would only get in the way of the fullscreen controls
-    if (box.width >= stageRect.width - 8 && box.height >= stageRect.height - 8) {
-        if (appliedStages.get(video) !== null) logger.info("Player already fills the stage, leaving the layout alone");
-        clearFill(video);
-        return;
-    }
-
-    // Always refresh the markers: Discord rebuilds parts of this chain on zoom and on fullscreen
-    // transitions, and the attributes do not survive a replaced element
-    const stageChanged = appliedStages.get(video) !== stage;
-    for (const el of chain) {
-        if (!el.hasAttribute("data-vc-streamfit-open")) el.setAttribute("data-vc-streamfit-open", "");
-    }
-    if (!stage.hasAttribute("data-vc-streamfit-stage")) stage.setAttribute("data-vc-streamfit-stage", "");
+    if (appliedStages.get(video) === stage) return;
     appliedStages.set(video, stage);
-    observeStage(stage);
 
-    if (stageChanged) {
-        logger.info(
-            "zoom can overflow the player:",
-            chain.map(el => `${describe(el)} overflow=${getComputedStyle(el).overflow}`).join(" > "),
-            "stage:",
-            `${describe(stage)} overflow=${getComputedStyle(stage).overflow}`
-        );
-    }
-}
+    clearFill(video);
+    appliedStages.set(video, stage);
 
-// Discord re-renders the tile while zooming and on fullscreen transitions; watch the stage so a
-// rebuilt chain gets its markers back without waiting for the next random event
-const observedStages = new WeakSet<HTMLElement>();
-let stageObserver: MutationObserver | null = null;
-let repairTimer: ReturnType<typeof setTimeout> | undefined;
+    for (const el of chain) el.setAttribute("data-vc-streamfit-open", "");
+    stage.setAttribute("data-vc-streamfit-stage", "");
 
-function observeStage(stage: HTMLElement) {
-    if (observedStages.has(stage)) return;
-    observedStages.add(stage);
-
-    stageObserver ??= new MutationObserver(() => {
-        clearTimeout(repairTimer);
-        repairTimer = setTimeout(() => forEachStream(applyFill), 100);
-    });
-
-    stageObserver.observe(stage, { subtree: true, attributes: true, attributeFilter: ["class", "style"], childList: true });
+    logger.info("zoom can overflow the player:", chain.map(describe).join(" > "), "stage:", describe(stage));
 }
 
 // region detection
@@ -421,40 +377,12 @@ const streamContextPatch: NavContextMenuPatchCallback = (children, { target }: {
     );
 };
 
-let layoutTimer: ReturnType<typeof setTimeout> | undefined;
-let wheelTimer: ReturnType<typeof setTimeout> | undefined;
-
-function onWheel() {
-    clearTimeout(wheelTimer);
-    wheelTimer = setTimeout(() => forEachStream(applyFill), 200);
-}
-
 function onMediaEvent(event: Event) {
     const video = event.target as HTMLVideoElement;
     if (video.tagName !== "VIDEO" || !isStream(video)) return;
 
-    // The element resizes when Discord enters fullscreen or changes the layout; the crop was
-    // computed for the old box, which is what left the picture zoomed and pushed to one side
-    clearTimeout(layoutTimer);
-    layoutTimer = setTimeout(() => {
-        applyFill(video);
-        if (crops.has(video)) applyCrop(video);
-    }, 150);
-}
-
-function onFullscreenChange() {
-    logger.info("fullscreen", document.fullscreenElement ? "entered" : "exited");
-
-    // The transform was computed for the old box, so it has to go; the crop itself stays in the
-    // map so a lock survives the trip through fullscreen
-    for (const video of crops.keys()) video.style.transform = "";
-
-    forEachStream(clearFill);
-
-    setTimeout(() => {
-        forEachStream(applyFill);
-        for (const video of crops.keys()) applyCrop(video);
-    }, 300);
+    applyFill(video);
+    if (crops.has(video)) applyCrop(video);
 }
 
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -483,9 +411,6 @@ export default definePlugin({
 
         // Media events do not bubble, so listen in the capture phase
         document.addEventListener("playing", onMediaEvent, true);
-        document.addEventListener("resize", onMediaEvent, true);
-        document.addEventListener("fullscreenchange", onFullscreenChange);
-        document.addEventListener("wheel", onWheel, true);
 
         // Only the window resizing changes the parent box; watching the video's own resize events
         // turns the fill into a layout feedback loop
@@ -497,15 +422,7 @@ export default definePlugin({
 
     stop() {
         document.removeEventListener("playing", onMediaEvent, true);
-        document.removeEventListener("resize", onMediaEvent, true);
-        document.removeEventListener("fullscreenchange", onFullscreenChange);
-        document.removeEventListener("wheel", onWheel, true);
         window.removeEventListener("resize", onWindowResize);
-        clearTimeout(layoutTimer);
-        clearTimeout(wheelTimer);
-        clearTimeout(repairTimer);
-        stageObserver?.disconnect();
-        stageObserver = null;
         clearTimeout(resizeTimer);
         document.getElementById(STYLE_ID)?.remove();
 
