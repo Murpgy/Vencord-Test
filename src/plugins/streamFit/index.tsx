@@ -38,8 +38,9 @@ interface CropState {
 
 const crops = new Map<HTMLVideoElement, CropState>();
 
-// Stage last applied to a video, so repeated events do not redo the same work
-const appliedStages = new WeakMap<HTMLVideoElement, HTMLElement | null>();
+// What was last applied to a video, so repeated checks do not redo the same work but a rebuilt
+// chain does get its markers back
+const appliedSignatures = new WeakMap<HTMLVideoElement, string>();
 
 const settings = definePluginSettings({
     unlockAspect: {
@@ -98,12 +99,12 @@ function describe(el: Element | null) {
 }
 
 function clearFill(video: HTMLVideoElement) {
-    for (let el = video.parentElement, depth = 0; el && depth < 12; el = el.parentElement, depth++) {
+    for (let el = video.parentElement, depth = 0; el && depth < 24; el = el.parentElement, depth++) {
         el.removeAttribute("data-vc-streamfit-open");
         el.removeAttribute("data-vc-streamfit-stage");
     }
 
-    appliedStages.delete(video);
+    appliedSignatures.delete(video);
 }
 
 function applyFill(video: HTMLVideoElement) {
@@ -133,7 +134,9 @@ function applyFill(video: HTMLVideoElement) {
     for (let el = video.parentElement, depth = 0; el && depth < 24; el = el.parentElement, depth++) {
         if (el !== sizer) {
             const rect = el.getBoundingClientRect();
-            if (rect.height > box.height + 16 && rect.width >= Math.min(box.width, window.innerWidth) * 0.5 && rect.width <= window.innerWidth + 1) {
+            // The stage has to be at least as wide as the player, or the zoom gets clipped on
+            // the right instead of filling the bars above and below
+            if (rect.height > box.height + 16 && rect.width >= box.width - 8 && rect.width <= window.innerWidth + 1) {
                 stage = el;
                 break;
             }
@@ -143,24 +146,26 @@ function applyFill(video: HTMLVideoElement) {
     }
 
     if (!stage) {
-        if (appliedStages.get(video) !== null) {
-            appliedStages.set(video, null);
+        if (appliedSignatures.has(video)) {
+            appliedSignatures.delete(video);
             logger.warn("No larger ancestor to clip at, the zoom stays inside the player:", chain.map(describe).join(" > "));
         }
         clearFill(video);
         return;
     }
 
-    if (appliedStages.get(video) === stage) return;
-    appliedStages.set(video, stage);
+    // A re-render can replace the chain without changing the stage, so remember the whole shape
+    const signature = `${chain.length}:${Math.round(box.width)}x${Math.round(box.height)}:${describe(stage)}`;
+    if (appliedSignatures.get(video) === signature) return;
+
+    const first = !appliedSignatures.has(video);
 
     clearFill(video);
-    appliedStages.set(video, stage);
-
     for (const el of chain) el.setAttribute("data-vc-streamfit-open", "");
     stage.setAttribute("data-vc-streamfit-stage", "");
+    appliedSignatures.set(video, signature);
 
-    logger.info("zoom can overflow the player:", chain.map(describe).join(" > "), "stage:", describe(stage));
+    if (first) logger.info("zoom can overflow the player:", chain.map(describe).join(" > "), "stage:", describe(stage));
 }
 
 // region detection
@@ -386,6 +391,7 @@ function onMediaEvent(event: Event) {
 }
 
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+let watchInterval: ReturnType<typeof setInterval> | undefined;
 
 function onWindowResize() {
     clearTimeout(resizeTimer);
@@ -417,6 +423,13 @@ export default definePlugin({
         window.addEventListener("resize", onWindowResize);
 
         forEachStream(applyFill);
+
+        // Discord occasionally rebuilds the tile without another playing event; a cheap check
+        // puts the markers back within a few seconds instead of leaving the zoom clipped wrong
+        watchInterval = setInterval(() => {
+            if (settings.store.unlockAspect) forEachStream(applyFill);
+        }, 3000);
+
         logger.info("started");
     },
 
@@ -424,6 +437,7 @@ export default definePlugin({
         document.removeEventListener("playing", onMediaEvent, true);
         window.removeEventListener("resize", onWindowResize);
         clearTimeout(resizeTimer);
+        clearInterval(watchInterval);
         document.getElementById(STYLE_ID)?.remove();
 
         for (const video of crops.keys()) clearCrop(video);
