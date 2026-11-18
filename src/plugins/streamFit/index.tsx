@@ -156,7 +156,11 @@ function applyFill(video: HTMLVideoElement) {
 
     // A re-render can replace the chain without changing the stage, so remember the whole shape
     const signature = `${chain.length}:${Math.round(box.width)}x${Math.round(box.height)}:${describe(stage)}`;
-    if (appliedSignatures.get(video) === signature) return;
+    const marked = stage.hasAttribute("data-vc-streamfit-stage")
+        && chain.every(el => el.hasAttribute("data-vc-streamfit-open"));
+
+    // A replaced element has the same shape but no attributes, so check both
+    if (marked && appliedSignatures.get(video) === signature) return;
 
     const first = !appliedSignatures.has(video);
 
